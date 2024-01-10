@@ -70,6 +70,8 @@ COSMOSDB_TAGS_DATABASE_NAME = os.environ.get("COSMOSDB_TAGS_DATABASE_NAME") or "
 COSMOSDB_TAGS_CONTAINER_NAME = os.environ.get("COSMOSDB_TAGS_CONTAINER_NAME") or "tagscontainer"
 
 QUERY_TERM_LANGUAGE = os.environ.get("QUERY_TERM_LANGUAGE") or "English"
+DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE") or "English"
+ALLOWED_LANGUAGES = os.environ.get("ALLOWED_LANGUAGES") or "English,German,Italian,Portuguese,Chinese,Japanese"
 
 TARGET_EMBEDDING_MODEL = os.environ.get("TARGET_EMBEDDINGS_MODEL") or "BAAI/bge-small-en-v1.5"
 ENRICHMENT_APPSERVICE_NAME = os.environ.get("ENRICHMENT_APPSERVICE_NAME") or "enrichment"
@@ -159,6 +161,8 @@ chat_approaches = {
         KB_FIELDS_CHUNKFILE,
         AZURE_BLOB_STORAGE_CONTAINER,
         blob_client,
+        ALLOWED_LANGUAGES,
+        DEFAULT_LANGUAGE,
         QUERY_TERM_LANGUAGE,
         model_name,
         model_version,

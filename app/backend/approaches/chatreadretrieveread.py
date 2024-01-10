@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import json
 import re
 import logging
 import urllib.parse
@@ -10,9 +9,7 @@ from typing import Any, Sequence
 
 import openai
 from approaches.approach import Approach
-from azure.core.credentials import AzureKeyCredential 
 from azure.search.documents import SearchClient  
-from azure.search.documents.indexes import SearchIndexClient  
 from azure.search.documents.models import RawVectorQuery
 from azure.search.documents.models import QueryType
 
@@ -28,9 +25,7 @@ from text import nonewlines
 import tiktoken
 from core.messagebuilder import MessageBuilder
 from core.modelhelper import get_token_limit
-from core.modelhelper import num_tokens_from_messages
 import requests
-from urllib.parse import quote
 
 # Simple retrieve-then-read implementation, using the Cognitive Search and
 # OpenAI APIs directly. It first retrieves top documents from search,
@@ -44,19 +39,40 @@ class ChatReadRetrieveReadApproach(Approach):
     USER = "user"
     ASSISTANT = "assistant"
      
+    # System message for the chat conversation commented out to remove the TARGET LANGUAGE 
+    #system_message_chat_conversation = """You are an Azure OpenAI Completion system. Your persona is {systemPersona} who helps answer questions about an agency's data. {response_length_prompt}
+    #User persona is {userPersona} Answer ONLY with the facts listed in the list of sources below in {query_term_language} with citations.If there isn't enough information below, say you don't know and do not give citations. For tabular information return it as an html table. Do not return markdown format.
+    #Your goal is to provide answers based on the facts listed below in the provided source documents. Avoid making assumptions,generating speculative or generalized information or adding personal opinions.
+    #   
+    #
+    #Each source has a file name followed by a pipe character and the actual information.Use square brackets to reference the source, e.g. [info1.txt]. Do not combine sources, list each source separately, e.g. [info1.txt][info2.pdf].
+    #Never cite the source content using the examples provided in this paragraph that start with info.
+    # 
+    #Here is how you should answer every question:
+    #
+    #-Look for information in the source documents to answer the question in {query_term_language}.
+    #-If the source document has an answer, please respond with citation.You must include a citation to each document referenced only once when you find answer in source documents.      
+    #-If you cannot find answer in below sources, respond with I am not sure.Do not provide personal opinions or assumptions and do not include citations.
+    # 
+    #{follow_up_questions_prompt}
+    #{injected_prompt}
+    #
+    #"""
+
     system_message_chat_conversation = """You are an Azure OpenAI Completion system. Your persona is {systemPersona} who helps answer questions about an agency's data. {response_length_prompt}
-    User persona is {userPersona} Answer ONLY with the facts listed in the list of sources below in {query_term_language} with citations.If there isn't enough information below, say you don't know and do not give citations. For tabular information return it as an html table. Do not return markdown format.
-    Your goal is to provide answers based on the facts listed below in the provided source documents. Avoid making assumptions,generating speculative or generalized information or adding personal opinions.
+    User persona is {userPersona} Answer ONLY with the facts listed in the list of sources below in one of the allowed languages that are: {allowed_languages} with citations. If there isn't enough information below, say you don't know and do not give citations. In this case, chose among {allowed_languages} according to the language used to ask the question. For tabular information return it as an html table. Return markdown format.
+    Your goal is to provide answers based on the facts listed below in the provided source documents. AVOID making assumptions, generating speculative or generalized information or adding personal opinions.
        
     
-    Each source has a file name followed by a pipe character and the actual information.Use square brackets to reference the source, e.g. [info1.txt]. Do not combine sources, list each source separately, e.g. [info1.txt][info2.pdf].
+    Each source has a file name followed by a pipe character and the actual information. Use square brackets to reference the source, e.g. [info1.txt]. Do not combine sources, list each source separately, e.g. [info1.txt][info2.pdf].
     Never cite the source content using the examples provided in this paragraph that start with info.
       
     Here is how you should answer every question:
     
-    -Look for information in the source documents to answer the question in {query_term_language}.
-    -If the source document has an answer, please respond with citation.You must include a citation to each document referenced only once when you find answer in source documents.      
-    -If you cannot find answer in below sources, respond with I am not sure.Do not provide personal opinions or assumptions and do not include citations.
+    -Look for information in the source documents to answer the question.
+    -Answer using the same language used to ask the question which must be among the following: {allowed_languages}.
+    -If the source document has an answer, please respond with citation. You must include a citation to each document referenced only once when you find answer in source documents.      
+    -If you cannot find answer in below sources, respond with: I am not sure, can you please rephrase your question? Use the same language used to ask the question. Do not provide personal opinions or assumptions and do not include citations.
     
     {follow_up_questions_prompt}
     {injected_prompt}
@@ -64,14 +80,14 @@ class ChatReadRetrieveReadApproach(Approach):
     """
     follow_up_questions_prompt_content = """
     Generate three very brief follow-up questions that the user would likely ask next about their agencies data. Use triple angle brackets to reference the questions, e.g. <<<Are there exclusions for prescriptions?>>>. Try not to repeat questions that have already been asked.
-    Only generate questions and do not generate any text before or after the questions, such as 'Next Questions'
+    Only generate questions and do not generate any text before or after the questions, such as 'Next Questions'. Use the same language used by the user to ask the question.
     """
     query_prompt_template = """Below is a history of the conversation so far, and a new question asked by the user that needs to be answered by searching in source documents.
     Generate a search query based on the conversation and the new question. Treat each search term as an individual keyword. Do not combine terms in quotes or brackets.
     Do not include cited source filenames and document names e.g info.txt or doc.pdf in the search query terms.
     Do not include any text inside [] or <<<>>> in the search query terms.
     Do not include any special characters like '+'.
-    If the question is not in {query_term_language}, translate the question to {query_term_language} before generating the search query.
+    If the question is not in one of the {allowed_languages}, translate the question to {default_language} before generating the search query.
     If you cannot generate a search query, return just the number 0.
     """
 
@@ -106,6 +122,8 @@ class ChatReadRetrieveReadApproach(Approach):
         chunk_file_field: str,
         content_storage_container: str,
         blob_client: BlobServiceClient,
+        allowed_languages: str,
+        default_language: str,
         query_term_language: str,
         model_name: str,
         model_version: str,
@@ -121,6 +139,8 @@ class ChatReadRetrieveReadApproach(Approach):
         self.chunk_file_field = chunk_file_field
         self.content_storage_container = content_storage_container
         self.blob_client = blob_client
+        self.allowed_languages = allowed_languages
+        self.default_language = default_language
         self.query_term_language = query_term_language
         self.chatgpt_token_limit = get_token_limit(model_name)
         #escape target embeddiong model name
@@ -152,7 +172,9 @@ class ChatReadRetrieveReadApproach(Approach):
 
         user_q = 'Generate search query for: ' + history[-1]["user"]
         
-        query_prompt=self.query_prompt_template.format(query_term_language=self.query_term_language)
+        query_prompt=self.query_prompt_template.format(query_term_language=self.query_term_language, 
+                                                       default_language=self.default_language,
+                                                       allowed_languages=self.allowed_languages)
         
 
         # STEP 1: Generate an optimized keyword search query based on the chat history and the last question
@@ -298,6 +320,8 @@ class ChatReadRetrieveReadApproach(Approach):
         if prompt_override is None:
             system_message = self.system_message_chat_conversation.format(
                 query_term_language=self.query_term_language,
+                allowed_languages=self.allowed_languages,
+                default_language=self.default_language,
                 injected_prompt="",
                 follow_up_questions_prompt=follow_up_questions_prompt,
                 response_length_prompt=self.get_response_length_prompt_text(
@@ -309,6 +333,8 @@ class ChatReadRetrieveReadApproach(Approach):
         elif prompt_override.startswith(">>>"):
             system_message = self.system_message_chat_conversation.format(
                 query_term_language=self.query_term_language,
+                allowed_languages=self.allowed_languages,
+                default_language=self.default_language,
                 injected_prompt=prompt_override[3:] + "\n ",
                 follow_up_questions_prompt=follow_up_questions_prompt,
                 response_length_prompt=self.get_response_length_prompt_text(
@@ -320,6 +346,8 @@ class ChatReadRetrieveReadApproach(Approach):
         else:
             system_message = self.system_message_chat_conversation.format(
                 query_term_language=self.query_term_language,
+                allowed_languages=self.allowed_languages,
+                default_language=self.default_language,
                 follow_up_questions_prompt=follow_up_questions_prompt,
                 response_length_prompt=self.get_response_length_prompt_text(
                     response_length
