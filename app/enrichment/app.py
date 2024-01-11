@@ -81,7 +81,7 @@ class AzOAIEmbedding(object):
     def __init__(self, deployment_name) -> None:
         self.deployment_name = deployment_name
     
-    @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
+    @retry(wait=wait_random_exponential(multiplier=1, min=15, max=60), stop=stop_after_attempt(15))
     def encode(self, texts):
         """Embeds a list of texts using a given model"""
         response = openai.Embedding.create(
